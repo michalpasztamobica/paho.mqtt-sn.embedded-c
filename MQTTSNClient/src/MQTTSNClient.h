@@ -81,7 +81,7 @@ public:
 
     int getNext()
     {
-        return next = (next == MAX_PACKET_ID) ? 1 : ++next;
+        return next = (next == MAX_PACKET_ID) ? 1 : next + 1;
     }
 
 private:
@@ -267,8 +267,6 @@ private:
 template<class Network, class Timer, int a, int MAX_MESSAGE_HANDLERS>
 MQTTSN::Client<Network, Timer, a, MAX_MESSAGE_HANDLERS>::Client(Network& network, unsigned int command_timeout_ms)  : ipstack(network), packetid()
 {
-    last_sent = Timer();
-    last_received = Timer();
     ping_outstanding = false;
     for (int i = 0; i < MAX_MESSAGE_HANDLERS; ++i)
         messageHandlers[i].topicFilter = 0;
@@ -454,18 +452,19 @@ int MQTTSN::Client<Network, Timer, a, MAX_MESSAGE_HANDLERS>::deliverMessage(MQTT
     // we have to find the right message handler - indexed by topic
     for (int i = 0; i < MAX_MESSAGE_HANDLERS; ++i)
     {
-        /*
-        if (messageHandlers[i].topicFilter != 0 && (MQTTSNtopic_equals(&topic, messageHandlers[i].topicFilter) ||
-                isTopicMatched(messageHandlers[i].topicFilter, topic)))
+        MQTTSNString str = MQTTSNString_initializer;
+        str.lenstring.data = topic.data.long_.name;
+        str.lenstring.len = topic.data.long_.len;
+        if (messageHandlers[i].topicFilter != 0 && (MQTTSNTopic_equals(&topic, messageHandlers[i].topicFilter) ||
+                isTopicMatched(messageHandlers[i].topicFilter->data.long_.name, str)))
         {
             if (messageHandlers[i].fp.attached())
             {
-                MessageData md(topicName, message);
+                MessageData md(topic, message);
                 messageHandlers[i].fp(md);
                 rc = SUCCESS;
             }
         }
-        */
     }
 
     if (rc == FAILURE && defaultMessageHandler.attached())
@@ -546,7 +545,7 @@ int MQTTSN::Client<Network, Timer, MAX_PACKET_SIZE, b>::cycle(Timer& timer)
             else if (isQoS2msgidFree(msg.id))
             {
                 if (useQoS2msgid(msg.id))
-                    deliverMessage(topicName, msg);
+                    deliverMessage(topicid, msg);
                 else
                     WARN("Maximum number of incoming QoS2 messages exceeded");
             }   
@@ -568,7 +567,7 @@ int MQTTSN::Client<Network, Timer, MAX_PACKET_SIZE, b>::cycle(Timer& timer)
             break;
 #endif
 #if MQTTCLIENT_QOS2
-        case PUBREC:
+        case MQTTSN_PUBREC:
             unsigned short mypacketid;
             unsigned char dup, type;
             if (MQTTDeserialize_ack(&type, &dup, &mypacketid, readbuf, MAX_PACKET_SIZE) != 1)
@@ -580,7 +579,7 @@ int MQTTSN::Client<Network, Timer, MAX_PACKET_SIZE, b>::cycle(Timer& timer)
             if (rc == FAILURE)
                 goto exit; // there was a problem
             break;
-        case PUBCOMP:
+        case MQTTSN_PUBCOMP:
             break;
 #endif
         case MQTTSN_PINGRESP:
@@ -701,7 +700,7 @@ exit:
 template<class Network, class Timer, int MAX_PACKET_SIZE, int b>
 int MQTTSN::Client<Network, Timer, MAX_PACKET_SIZE, b>::connect()
 {
-    MQTTPacket_connectData default_options = MQTTPacket_connectData_initializer;
+    MQTTSNPacket_connectData default_options = MQTTSNPacket_connectData_initializer;
     return connect(default_options);
 }
 
@@ -714,7 +713,7 @@ int MQTTSN::Client<Network, Timer, MAX_PACKET_SIZE, MAX_MESSAGE_HANDLERS>::subsc
     int len = 0;
 
     if (!isconnected)
-        goto exit;
+        return FAILURE; // goto exit cannot cross variable initialization
         
     bool freeHandler = false;
     for (int i = 0; i < MAX_MESSAGE_HANDLERS; ++i)
@@ -742,8 +741,12 @@ int MQTTSN::Client<Network, Timer, MAX_PACKET_SIZE, MAX_MESSAGE_HANDLERS>::subsc
         int grantedQoS = -1;
         unsigned short mypacketid;
         unsigned char rc;
-        if (MQTTSNDeserialize_suback(&grantedQoS, &topicFilter.data.id, &mypacketid, &rc, readbuf, MAX_PACKET_SIZE) == 1)
-            rc = grantedQoS;
+        if (MQTTSNDeserialize_suback(&grantedQoS, &topicFilter.data.id, &mypacketid, &rc, readbuf, MAX_PACKET_SIZE) != 1)
+            goto exit;
+
+        if (qos != grantedQoS)
+            goto exit;
+
         if (rc == MQTTSN_RC_ACCEPTED)
         {
             for (int i = 0; i < MAX_MESSAGE_HANDLERS; ++i)
